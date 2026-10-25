@@ -338,7 +338,7 @@ app.post('/api/draws/:id/run', auth, adminOnly, wrap(async (req, res) => {
       const ex = await RaceRecording.findOne({ draw: d._id });
       if (!ex) await RaceRecording.create({ draw: d._id, raw: sim.raw, hash });
       else if (ex.hash !== hash) throw new Error('이전 시도의 녹화와 달라요');
-      physics = { engine: race.ENGINE, recordingHash: hash };
+      physics = { engine: sim.engine, recordingHash: hash };
     } else {
       winnerIds = pickWinners(ids, d.winnerCount, d.seed);
     }
@@ -404,7 +404,8 @@ async function verifyRaceResult(r, prev) {
       const order = JSON.parse(raw).order;
       winnersMatch = JSON.stringify(order.slice(0, r.winnerCount).map((i) => sorted[i])) === JSON.stringify(r.winners.map((w) => w.id));
     } catch { /* 녹화가 깨져 있으면 불일치 */ }
-    resimSame = race.simulate({ seed: r.seed, n: sorted.length, winnerCount: r.winnerCount }).raw === raw;
+    // 결과에 기록된 엔진/트랙 버전 그대로 다시 돌린다 (물리 조건을 바꾼 뒤에도 옛 결과가 계속 검증되도록)
+    resimSame = race.simulate({ seed: r.seed, n: sorted.length, winnerCount: r.winnerCount, version: race.versionOf(r.engine) }).raw === raw;
   }
   return [
     ['seed 가 마감 때 공개한 commitment 와 일치', sha256(r.seed) === r.commitment],

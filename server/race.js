@@ -6,15 +6,23 @@ const Matter = require('matter-js');
 
 const { Engine, Composite, Bodies, Body, Constraint } = Matter;
 
-const TRACK = 'track-v1';
 const ALGO = 'matter-physics-v1';
-const ENGINE = `matter-js@${require('matter-js/package.json').version} ${TRACK} dt=16.667ms`;
 
 const W = 600;
 const H = 3900;
 const FINISH_Y = 3600;
 const STEP_MS = 1000 / 60;
-const GRAVITY = 0.28; // 낮출수록 경기가 길어진다
+
+// 물리 조건은 버전으로 고정한다. 이미 추첨된 결과는 자기 버전으로만 다시 재현·검증되므로 기존 버전은 절대 바꾸지 않는다.
+//  - v1: 가볍고 빠르게 떨어져 구슬이 길게 흩어졌다 (기록 보존용)
+//  - v2: 공기저항을 높이고 중력도 높여, 구슬이 한 무리로 몰려 내려오며 순위가 계속 바뀐다. 밀집해서 출발한다.
+const VERSIONS = {
+  'track-v1': { gravity: 0.28, frictionAir: 0.0015, maxCols: (n) => n },
+  'track-v2': { gravity: 1.5, frictionAir: 0.03, maxCols: (n) => Math.max(4, Math.ceil(Math.sqrt(n))) },
+};
+const LATEST = 'track-v2';
+const engineId = (version) => `matter-js@${require('matter-js/package.json').version} ${version} dt=16.667ms`;
+const versionOf = (engine) => { const m = /track-v\d+/.exec(engine || ''); return m && VERSIONS[m[0]] ? m[0] : 'track-v1'; };
 const SAMPLE = 2; // 2스텝마다 1프레임 기록 (30fps)
 const MAX_STEPS = 60 * 120;
 const TAIL_STEPS = 60; // 마지막 당첨자가 들어온 뒤 1초 더 기록
@@ -36,10 +44,10 @@ function floatsFor(seed, count) {
 function slotOrder(n, f) {
   return Array.from({ length: n }, (_, i) => i).sort((a, b) => f[a] - f[b] || a - b); // slotOf[slot] = marble
 }
-function initialState(n, f, r) {
+function initialState(n, f, r, version = LATEST) {
   const slotOf = slotOrder(n, f);
   const spacing = 2 * r + 4;
-  const cols = Math.max(1, Math.min(n, Math.floor((W - 80) / spacing)));
+  const cols = Math.max(1, Math.min(n, Math.floor((W - 80) / spacing), VERSIONS[version].maxCols(n)));
   const out = new Array(n);
   slotOf.forEach((marble, slot) => {
     const row = Math.floor(slot / cols);
@@ -109,18 +117,20 @@ function buildTrack() {
 }
 
 // 시뮬레이션 전체를 돌려 녹화(raw JSON 문자열)와 도착 순서를 돌려준다.
-function simulate({ seed, n, winnerCount }) {
+function simulate({ seed, n, winnerCount, version = LATEST }) {
+  const P = VERSIONS[version];
+  if (!P) throw new Error('알 수 없는 트랙 버전: ' + version);
   Matter.Common._nextId = 0; // 엔진 내부 전역 상태를 초기화해서 매번 같은 조건으로 시작한다
   Matter.Common._seed = 0;
 
   const r = radiusFor(n);
   const f = floatsFor(seed, 4 * n);
-  const init = initialState(n, f, r);
+  const init = initialState(n, f, r, version);
   const slotOf = slotOrder(n, f);
   const slotRank = new Array(n);
   slotOf.forEach((marble, slot) => { slotRank[marble] = slot; });
   const engine = Engine.create({ enableSleeping: false });
-  engine.gravity.y = GRAVITY;
+  engine.gravity.y = P.gravity;
   const { shapes, statics, bars } = buildTrack();
   Composite.add(engine.world, statics);
   Composite.add(engine.world, bars.map((b) => b.body));
@@ -130,7 +140,7 @@ function simulate({ seed, n, winnerCount }) {
   const marbles = new Array(n);
   for (const i of slotOf) {
     const s = init[i];
-    const b = Bodies.circle(s.x, s.y, r, { restitution: 0.55, friction: 0.005, frictionAir: 0.0015, density: 0.002, slop: 0.05 });
+    const b = Bodies.circle(s.x, s.y, r, { restitution: 0.55, friction: 0.005, frictionAir: P.frictionAir, density: 0.002, slop: 0.05 });
     Body.setVelocity(b, { x: s.vx, y: 0 });
     marbles[i] = b;
   }
@@ -199,11 +209,11 @@ function simulate({ seed, n, winnerCount }) {
   const fullOrder = order.concat(rest);
 
   const recording = {
-    v: 1, track: TRACK, W, H, finishY: FINISH_Y, r, n, fps: 60 / SAMPLE, frames, winnerCount,
+    v: 1, track: version, W, H, finishY: FINISH_Y, r, n, fps: 60 / SAMPLE, frames, winnerCount,
     shapes, pos, bars: barRec, order: fullOrder,
   };
   const raw = JSON.stringify(recording);
-  return { raw, order: fullOrder, frames, seconds: step / 60 };
+  return { raw, order: fullOrder, frames, seconds: step / 60, engine: engineId(version) };
 }
 
-module.exports = { simulate, ALGO, ENGINE, TRACK, W, H, FINISH_Y, radiusFor, floatsFor, slotOrder, initialState };
+module.exports = { simulate, ALGO, LATEST, engineId, versionOf, W, H, FINISH_Y, radiusFor, floatsFor, slotOrder, initialState };

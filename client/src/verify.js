@@ -48,10 +48,12 @@ async function raceFloats(seed, count) {
 }
 
 // server/race.js 의 initialState 와 같은 계산
-function raceInitial(n, f, r) {
+function raceInitial(n, f, r, track) {
   const slotOf = Array.from({ length: n }, (_, i) => i).sort((a, b) => f[a] - f[b] || a - b);
   const spacing = 2 * r + 4;
-  const cols = Math.max(1, Math.min(n, Math.floor((RACE_W - 80) / spacing)));
+  // v1 은 한 줄로, v2 는 밀집해서 출발한다 (server/race.js 의 VERSIONS.maxCols 와 같아야 한다)
+  const maxCols = track === 'track-v1' ? n : Math.max(4, Math.ceil(Math.sqrt(n)));
+  const cols = Math.max(1, Math.min(n, Math.floor((RACE_W - 80) / spacing), maxCols));
   const out = new Array(n);
   slotOf.forEach((marble, slot) => {
     const row = Math.floor(slot / cols);
@@ -87,7 +89,7 @@ async function raceChecks(r, sorted, raw) {
   // 첫 프레임이 seed 에서 계산한 출발 위치와 같은가
   let startOk = rec.n === n && rec.r === radiusFor(n) && xs.length === n;
   if (startOk) {
-    const init = raceInitial(n, await raceFloats(r.seed, 4 * n), rec.r);
+    const init = raceInitial(n, await raceFloats(r.seed, 4 * n), rec.r, rec.track);
     startOk = init.every((p, i) => xs[i][0] === Math.round(p.x) && ys[i][0] === Math.round(p.y));
   }
 
