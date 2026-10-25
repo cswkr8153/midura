@@ -1,0 +1,23 @@
+{
+  "name": "fair-lottery",
+  "version": "1.0.0",
+  "description": "공정하고 검증 가능한 추첨 사이트",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.6",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.0",
+    "jsonwebtoken": "^9.0.2",
+    "matter-js": "^0.20.0",
+    "mongoose": "^8.6.0"
+  }
+}
