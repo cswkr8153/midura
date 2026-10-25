@@ -15,8 +15,7 @@ const PORT = process.env.PORT || 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
 if ((!MONGODB_URI && !MONGODB_ATLAS_URL) || !JWT_SECRET) {
-  console.error('MONGODB_URI(또는 MONGODB_ATLAS_URL) 와 JWT_SECRET 환경변수가 필요해요. .env 파일을 확인해줘.');
-  process.exit(1);
+  throw new Error('MONGODB_URI(또는 MONGODB_ATLAS_URL) 와 JWT_SECRET 환경변수가 필요해요. .env 파일(또는 Vercel 환경변수)을 확인해줘.');
 }
 
 /* ---------- 추첨 알고리즘 (공개 · 재현 가능) ---------- */
@@ -172,6 +171,8 @@ const adminOnly = (req, res, next) => (req.isAdmin ? next() : fail(res, 403, '�
 const app = express();
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '20kb' }));
+// 모든 /api 요청은 DB 연결이 준비된 뒤에 처리한다 (ensureDb 는 아래에 정의)
+app.use('/api', (req, res, next) => ensureDb().then(() => next(), next));
 app.use(cookieParser());
 // 배포: client 를 빌드(npm run build)하면 client/dist 를 서버가 함께 서빙. 개발 중에는 vite(5173)가 /api 를 프록시한다.
 app.use(express.static(path.join(__dirname, '..', 'client', 'dist')));
@@ -276,34 +277,10 @@ app.get('/api/draws/:id', auth, wrap(async (req, res) => {
   res.json({ draw: await drawOut(d, req) });
 }));
 
-// 실시간 알림 (SSE): 추첨 화면을 열어둔 사람에게 참여/마감/추첨 신호를 보낸다. 신호에는 데이터가 없고,
-// 받은 쪽이 권한 검사를 거친 API 로 다시 조회하므로 정보가 새지 않는다.
-const watchers = new Map(); // drawId -> Set<res>
-function broadcast(drawId, type) {
-  const set = watchers.get(String(drawId));
-  if (set) for (const r of set) r.write(`event: ${type}\ndata: {}\n\n`);
-}
-app.get('/api/draws/:id/events', auth, (req, res) => {
-  if (!isId(req.params.id)) return fail(res, 400, '잘못된 요청이에요');
-  res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-  res.flushHeaders();
-  res.write('retry: 3000\n\n');
-  const key = req.params.id;
-  if (!watchers.has(key)) watchers.set(key, new Set());
-  watchers.get(key).add(res);
-  const beat = setInterval(() => res.write(': ping\n\n'), 25000);
-  req.on('close', () => {
-    clearInterval(beat);
-    const set = watchers.get(key);
-    if (set) { set.delete(res); if (!set.size) watchers.delete(key); }
-  });
-});
-
 app.post('/api/draws/:id/join', auth, wrap(async (req, res) => {
   if (!isId(req.params.id)) return fail(res, 400, '잘못된 요청이에요');
   const r = await Draw.updateOne({ _id: req.params.id, status: 'open' }, { $addToSet: { participants: req.user._id } });
   if (!r.matchedCount) return fail(res, 409, '참여를 받는 중인 추첨이 아니에요');
-  broadcast(req.params.id, 'update');
   res.json({ ok: true });
 }));
 
@@ -311,7 +288,6 @@ app.post('/api/draws/:id/leave', auth, wrap(async (req, res) => {
   if (!isId(req.params.id)) return fail(res, 400, '잘못된 요청이에요');
   const r = await Draw.updateOne({ _id: req.params.id, status: 'open' }, { $pull: { participants: req.user._id } });
   if (!r.matchedCount) return fail(res, 409, '마감된 추첨은 참여를 취소할 수 없어요');
-  broadcast(req.params.id, 'update');
   res.json({ ok: true });
 }));
 
@@ -332,7 +308,6 @@ app.post('/api/draws/:id/close', auth, adminOnly, wrap(async (req, res) => {
   const seed = crypto.randomBytes(32).toString('hex');
   const ids = d.participants.map(String).sort();
   await Draw.updateOne({ _id: d._id }, { $set: { seed, commitment: sha256(seed), participantsHash: hashParticipants(ids) } });
-  broadcast(d._id, 'update');
   res.json({ draw: await drawOut(await Draw.findById(d._id), req) });
 }));
 
@@ -395,7 +370,6 @@ app.post('/api/draws/:id/run', auth, adminOnly, wrap(async (req, res) => {
     }
     if (!saved) throw new Error('결과 저장 실패');
     await Draw.updateOne({ _id: d._id }, { $set: { status: 'drawn' } });
-    broadcast(d._id, 'drawn'); // 화면을 열어둔 모든 참여자가 동시에 연출을 시작한다
     res.json({ draw: await drawOut(await Draw.findById(d._id), req) });
   } catch (e) {
     await Draw.updateOne({ _id: d._id, status: 'drawing' }, { $set: { status: 'closed' } });
@@ -548,17 +522,31 @@ async function connectDb() {
   const targets = [['Atlas', MONGODB_ATLAS_URL], ['로컬', MONGODB_URI]].filter(([, uri]) => uri);
   for (const [name, uri] of targets) {
     try {
-      await mongoose.connect(uri, { serverSelectionTimeoutMS: 8000 });
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 8000, maxPoolSize: 5 });
       console.log(`MongoDB 연결됨 (${name})`);
       return;
     } catch (e) {
       console.error(`MongoDB ${name} 연결 실패:`, e.message);
     }
   }
-  process.exit(1);
+  throw new Error('MongoDB 연결 실패');
 }
 
-connectDb().then(async () => {
-  await Promise.all([User.init(), Draw.init(), DrawResult.init()]);
-  app.listen(PORT, () => console.log(`서버 시작: http://localhost:${PORT}`));
-});
+// 서버리스(Vercel)에서는 함수가 재사용되는 동안 연결을 한 번만 만든다. 실패하면 다음 요청에서 다시 시도한다.
+let dbPromise = null;
+function ensureDb() {
+  if (!dbPromise) {
+    dbPromise = connectDb()
+      .then(() => Promise.all([User.init(), Draw.init(), DrawResult.init(), RaceRecording.init()]))
+      .catch((e) => { dbPromise = null; throw e; });
+  }
+  return dbPromise;
+}
+// 로컬에서 직접 실행(npm start)하면 서버를 띄우고, Vercel 에서는 app 을 함수로 내보내기만 한다.
+if (require.main === module) {
+  ensureDb()
+    .then(() => app.listen(PORT, () => console.log(`서버 시작: http://localhost:${PORT}`)))
+    .catch(() => process.exit(1));
+}
+
+module.exports = app;

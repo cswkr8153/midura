@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api, STATUS, STYLE_LABEL, badgeClass, fmt } from '../api.js';
 import { useApp } from '../AppContext.js';
@@ -30,14 +30,31 @@ export default function Detail() {
 
   useEffect(() => { setD(null); setRunKey(0); setModal(false); setServer(null); setLocal(null); setRec(null); load(); }, [id, load]);
 
-  // 실시간: 다른 사람의 참여/마감은 갱신하고, 추첨이 실행되면 열려 있는 모든 화면이 함께 연출을 시작한다.
+  // 실시간(폴링): 추첨이 끝나기 전까지 2.5초마다 상태를 확인한다. 다른 사람의 참여/마감이 반영되고,
+  // 상태가 "추첨 완료"로 바뀌는 순간 열려 있는 모든 화면이 연출을 시작한다. (서버리스에서는 SSE 를 쓸 수 없어서 폴링)
+  const dRef = useRef(null);
+  dRef.current = d;
   useEffect(() => {
-    if (typeof EventSource === 'undefined') return undefined;
-    const es = new EventSource(`/api/draws/${id}/events`);
-    es.addEventListener('update', () => load());
-    es.addEventListener('drawn', async () => { await load(); setRunKey((k) => (k === 0 ? 1 : k)); });
-    return () => es.close();
-  }, [id, load]);
+    let busy = false;
+    const poll = async () => {
+      const cur = dRef.current;
+      if (busy || document.hidden || !cur || cur.status === 'drawn') return;
+      busy = true;
+      try {
+        const nd = (await api('/draws/' + id)).draw;
+        if (JSON.stringify(nd) !== JSON.stringify(dRef.current)) {
+          const justDrawn = dRef.current && dRef.current.status !== 'drawn' && nd.status === 'drawn';
+          setD(nd);
+          if (justDrawn) setRunKey((k) => (k === 0 ? 1 : k));
+        }
+      } catch { /* 일시적인 오류는 다음 주기에 다시 시도 */ }
+      busy = false;
+    };
+    const t = setInterval(poll, 2500);
+    const onVisible = () => { if (!document.hidden) poll(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVisible); };
+  }, [id]);
 
   // 결과가 있으면 서버를 거치지 않고 브라우저에서 직접 다시 계산해 본다.
   const hasResult = !!(d && d.result);
