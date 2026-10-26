@@ -515,22 +515,30 @@ app.patch('/api/admin/users/:id', auth, adminOnly, wrap(async (req, res) => {
 /* ---------- 에러 처리 & 시작 ---------- */
 app.use((err, req, res, next) => {
   console.error(err);
-  res.status(500).json({ error: '서버 오류가 발생했어요' });
+  // 원인 종류만 괄호로 알려준다 (비밀번호나 주소 같은 세부 내용은 노출하지 않는다)
+  const msg = String((err && err.message) || '');
+  let code = '';
+  if (/bad auth|authentication failed/i.test(msg)) code = 'DB_AUTH';
+  else if (/ENOTFOUND|ETIMEDOUT|ECONNREFUSED|Server selection timed out|Could not connect to any servers|whitelist|buffering timed out/i.test(msg)) code = 'DB_NETWORK';
+  else if (/MongoDB 연결 실패/.test(msg)) code = 'DB_CONNECT';
+  res.status(500).json({ error: '서버 오류가 발생했어요' + (code ? ` (${code})` : '') });
 });
 
 // Atlas 를 먼저 시도하고, 실패하면 로컬(MONGODB_URI)로 연결
 async function connectDb() {
   const targets = [['Atlas', MONGODB_ATLAS_URL], ['로컬', MONGODB_URI]].filter(([, uri]) => uri);
+  let lastError = '';
   for (const [name, uri] of targets) {
     try {
       await mongoose.connect(uri, { serverSelectionTimeoutMS: 8000, maxPoolSize: 5 });
       console.log(`MongoDB 연결됨 (${name})`);
       return;
     } catch (e) {
+      lastError = e.message;
       console.error(`MongoDB ${name} 연결 실패:`, e.message);
     }
   }
-  throw new Error('MongoDB 연결 실패');
+  throw new Error('MongoDB 연결 실패: ' + lastError);
 }
 
 // 서버리스(Vercel)에서는 함수가 재사용되는 동안 연결을 한 번만 만든다. 실패하면 다음 요청에서 다시 시도한다.
